@@ -1,4 +1,4 @@
-import { searchCode } from "./searchCode";
+import { searchCode } from "../tools/searchCode";
 
 async function main() {
     const results = await searchCode("cookie");
