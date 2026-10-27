@@ -1,52 +1,75 @@
-import { GoogleGenAI, Type } from "@google/genai";
-import "dotenv/config";
-import { z } from "zod";
 
-// Initialize the Google Gen AI client
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+import fs from "node:fs/promises";
+import path from "node:path";
 
-// Define Zod schema for runtime validation
-const UserSchema = z.object({
-    name: z.string(),
-    age: z.number(),
-    role: z.string(),
-});
+const ROOT = path.resolve(process.env.CODEBASE_PATH ?? "./sample-repo");
 
-async function main() {
-    const prompt = `
-    Extract the user information.
+const ALLOWED_EXTENSIONS = new Set([
+    ".ts",
+    ".tsx",
+    ".js",
+    ".jsx",
+]);
 
-    My name is Shayan, I am 25 years old,
-    and I work as a software engineer.
-  `;
+const IGNORED_DIRECTORIES = new Set([
+    "node_modules",
+    ".git",
+    "dist",
+    "build",
+    ".next",
+]);
 
-    // Request structured JSON output using Gemini 2.5 Flash
-    const response = await ai.models.generateContent({
-        model: "gemini-3.5-flash-lite",
-        contents: prompt,
-        config: {
-            responseMimeType: "application/json",
-            responseSchema: {
-                type: Type.OBJECT,
-                properties: {
-                    name: { type: Type.STRING },
-                    age: { type: Type.NUMBER },
-                    role: { type: Type.STRING },
-                },
-                required: ["name", "age", "role"],
-            },
-        },
-    });
-
-    // Ensure response text exists before parsing
-    if (!response.text) {
-        throw new Error("No response returned from Gemini API.");
+export async function searchCode(query: string) {
+    if (!query.trim()) {
+        throw new Error("Search query cannot be empty");
     }
 
-    // Parse and validate with Zod
-    const user = UserSchema.parse(JSON.parse(response.text));
+    const results: {
+        file: string;
+        line: number;
+        text: string;
+    }[] = [];
 
-    console.log(user);
+    async function walk(directory: string): Promise<void> {
+        const entries = await fs.readdir(directory, {
+            withFileTypes: true,
+        });
+
+        for (const entry of entries) {
+            if (results.length >= 50) return;
+
+            const fullPath = path.join(directory, entry.name);
+
+            if (entry.isDirectory()) {
+                if (!IGNORED_DIRECTORIES.has(entry.name)) {
+                    await walk(fullPath);
+                }
+
+                continue;
+            }
+
+            if (!ALLOWED_EXTENSIONS.has(path.extname(entry.name))) {
+                continue;
+            }
+
+            const content = await fs.readFile(fullPath, "utf8");
+            const lines = content.split("\n");
+
+            lines.forEach((line, index) => {
+                if (
+                    results.length < 50 &&
+                    line.toLowerCase().includes(query.toLowerCase())
+                ) {
+                    results.push({
+                        file: path.relative(ROOT, fullPath),
+                        line: index + 1,
+                        text: line.trim().slice(0, 300),
+                    });
+                }
+            });
+        }
+    }
+
+    await walk(ROOT);
+    return results;
 }
-
-main().catch(console.error);
