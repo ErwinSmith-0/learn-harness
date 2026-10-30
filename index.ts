@@ -88,7 +88,7 @@ the bug. Read the relevant file before drawing conclusions.
 
     let response = await chat.sendMessage({ message: question });
 
-    const MAX_ITERATIONS = 6;
+    const MAX_ITERATIONS = 20;
 
     for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
         const functionCalls = response.functionCalls;
