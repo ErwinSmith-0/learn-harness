@@ -11,9 +11,7 @@ export type Finding = {
 
 export type AgentState = {
     task: string;
-
     findings: Finding[];
-
     inspectedFiles: string[];
 
     recentToolResults: {
@@ -22,4 +20,7 @@ export type AgentState = {
     }[];
 
     iteration: number;
+
+    completed: boolean;
+    completionReason?: string;
 };

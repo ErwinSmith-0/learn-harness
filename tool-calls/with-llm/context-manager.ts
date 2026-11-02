@@ -167,6 +167,8 @@ the bug. Read the relevant file before drawing conclusions.
         inspectedFiles: [],
         recentToolResults: [],
         iteration: 0,
+        completed: false,
+        completionReason: undefined,
     };
 
     // The harness now owns the conversation history.

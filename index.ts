@@ -99,12 +99,60 @@ const submitFindingDeclaration: FunctionDeclaration = {
     },
 };
 
+const finishInvestigationDeclaration: FunctionDeclaration = {
+    name: "finish_investigation",
+    description:
+        "Finish the investigation when sufficient evidence has been collected and validated.",
+
+    parameters: {
+        type: Type.OBJECT,
+        properties: {
+            reason: {
+                type: Type.STRING,
+                description: "Explain why the investigation is complete.",
+            },
+        },
+        required: ["reason"],
+    },
+};
+
 async function executeTool(
     name: string,
     args: Record<string, unknown>,
     state: AgentState
 ): Promise<unknown> {
 
+    if (name === "finish_investigation") {
+        if (state.completed) {
+            throw new Error("Investigation is already complete.");
+        }
+
+        if (state.findings.length === 0) {
+            throw new Error(
+                "Cannot finish: no validated findings have been submitted."
+            );
+        }
+
+        const reason = args.reason;
+
+        if (
+            typeof reason !== "string" ||
+            reason.trim().length === 0
+        ) {
+            throw new Error("A valid completion reason is required.");
+        }
+
+        state.completed = true;
+        state.completionReason = reason.trim();
+
+        console.log("\n[Agent] Investigation completed.");
+        console.log(`[Agent] Reason: ${state.completionReason}`);
+
+        return {
+            success: true,
+            message: "Investigation marked as complete.",
+        };
+    }
     if (name === "submit_finding") {
         const finding = args as unknown as Finding;
         console.log(`Tool requested: submit_finding("${finding.claim}")`);
@@ -208,6 +256,17 @@ Available tools:
 
 - search_code: Find relevant files and lines.
 - read_file: Inspect the actual contents of a specific file.
+- submit_finding: Submit evidence-backed findings for validation.
+- finish_investigation: Mark the investigation complete when sufficient evidence exists.
+
+COMPLETION RULES:
+
+1. Do not finish an investigation without sufficient evidence.
+2. Submit relevant findings using submit_finding.
+3. Once the validated findings sufficiently answer the original task,
+   call finish_investigation.
+4. Do not continue searching after the investigation is complete.
+5. If evidence is insufficient, continue investigating.
 
 Important:
 A search result is not enough to conclude that a file contains
@@ -220,6 +279,8 @@ the bug. Read the relevant file before drawing conclusions.
         inspectedFiles: [],
         recentToolResults: [],
         iteration: 0,
+        completed: false,
+        completionReason: undefined,
     };
 
     // The harness now owns the conversation history.
@@ -238,10 +299,13 @@ the bug. Read the relevant file before drawing conclusions.
                     searchCodeDeclaration,
                     readFileDeclaration,
                     submitFindingDeclaration,
+                    finishInvestigationDeclaration
                 ],
             },
         ],
     };
+
+
 
     // First model request.
     let response = await ai.models.generateContent({
@@ -324,13 +388,48 @@ the bug. Read the relevant file before drawing conclusions.
             }
         }
 
-        // Add tool results to the manually managed history.
+        // Add tool results to manually managed history.
         history.push({
             role: "user",
             parts: functionResponseParts,
         });
 
-        // Ask Gemini to continue using the updated history.
+        // Check whether the harness marked the investigation complete.
+        if (state.completed) {
+            console.log("\n[Agent] Switching to final-answer mode...");
+
+            const finalResponse = await ai.models.generateContent({
+                model,
+                contents: history,
+                config: {
+                    systemInstruction: `
+You are now in final-answer mode.
+
+The investigation has been marked complete by the harness.
+
+Use the validated findings provided in the investigation context.
+Explain the original issue clearly.
+Include relevant file paths and line numbers.
+Do not invent additional evidence.
+Do not request or execute more tools.
+Distinguish confirmed findings from assumptions.
+            `.trim(),
+                },
+            });
+
+            console.log("\n========== VALIDATED FINDINGS ==========\n");
+            console.dir(state.findings, { depth: null });
+
+            console.log("\n========== COMPLETION REASON ==========\n");
+            console.log(state.completionReason);
+
+            console.log("\n========== FINAL ANSWER ==========\n");
+            console.log(finalResponse.text);
+
+            return;
+        }
+
+        // Investigation is not complete. Continue the agent loop.
         response = await ai.models.generateContent({
             model,
             contents: history,
