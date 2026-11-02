@@ -12,6 +12,8 @@ import {
     type Content,
 } from "@google/genai";
 import { buildContext } from "./agent/contextManager";
+import { addValidatedFinding } from "./agent/findingValidator";
+import type { Finding } from "./agent/agentState";
 
 const ai = new GoogleGenAI({
     apiKey: process.env.GEMINI_API_KEY,
@@ -58,11 +60,62 @@ const readFileDeclaration: FunctionDeclaration = {
     },
 };
 
+const submitFindingDeclaration: FunctionDeclaration = {
+    name: "submit_finding",
+    description:
+        "Submit a finding supported by exact source-code evidence. Only submit findings from files already inspected using read_file.",
+
+    parameters: {
+        type: Type.OBJECT,
+        properties: {
+            claim: {
+                type: Type.STRING,
+                description: "The conclusion or discovery from the investigation.",
+            },
+            evidence: {
+                type: Type.ARRAY,
+                description: "Exact source-code evidence supporting the claim.",
+                items: {
+                    type: Type.OBJECT,
+                    properties: {
+                        file: {
+                            type: Type.STRING,
+                            description: "Repository-relative file path.",
+                        },
+                        lines: {
+                            type: Type.STRING,
+                            description: "Line range, e.g. 8-12.",
+                        },
+                        excerpt: {
+                            type: Type.STRING,
+                            description: "Exact source code copied from those lines.",
+                        },
+                    },
+                    required: ["file", "lines", "excerpt"],
+                },
+            },
+        },
+        required: ["claim", "evidence"],
+    },
+};
+
 async function executeTool(
     name: string,
     args: Record<string, unknown>,
     state: AgentState
 ): Promise<unknown> {
+
+    if (name === "submit_finding") {
+        const finding = args as unknown as Finding;
+        console.log(`Tool requested: submit_finding("${finding.claim}")`);
+        await addValidatedFinding(finding, state);
+        console.log("Finding successfully validated and stored.");
+
+        return {
+            success: true,
+            message: "Finding successfully validated and stored.",
+        };
+    }
     if (name === "search_code") {
         const query = args.query;
 
@@ -106,8 +159,8 @@ async function executeTool(
 
         const result = await readFile(path);
 
-        if (!state.inspectedFiles.includes(path)) {
-            state.inspectedFiles.push(path);
+        if (!state.inspectedFiles.includes(result.path)) {
+            state.inspectedFiles.push(result.path);
         }
 
         state.recentToolResults.push({
@@ -139,19 +192,17 @@ repository tools and provide an evidence-based explanation.
 
 Investigation strategy:
 
-1. Start with search_code to locate relevant files and symbols.
-2. When search_code identifies a potentially relevant file,
-   use read_file to inspect the actual implementation.
-3. Do not repeatedly search for different variations of the same
-   query when you already have a relevant file path.
-4. Follow the evidence. If the first file does not explain the
-   issue, investigate related files.
-5. Keep track of what you have already inspected.
-6. Stop investigating once you have enough evidence to explain
-   the issue.
-7. If evidence is insufficient, clearly explain what is missing.
-8. Never claim that you changed code.
-9. Never modify files.
+FINDING RULES:
+
+1. Use search_code to locate relevant code.
+2. Use read_file to inspect the complete relevant source.
+3. Use numberedContent to identify exact source line numbers.
+4. Once you have sufficient evidence, call submit_finding.
+5. Include the exact source excerpt and its line range.
+6. Never invent line numbers or source excerpts.
+7. If submit_finding rejects your evidence, correct it or investigate further.
+8. Once a finding is successfully submitted and it answers the task,
+   provide your final explanation instead of repeating searches.
 
 Available tools:
 
@@ -186,6 +237,7 @@ the bug. Read the relevant file before drawing conclusions.
                 functionDeclarations: [
                     searchCodeDeclaration,
                     readFileDeclaration,
+                    submitFindingDeclaration,
                 ],
             },
         ],
@@ -286,6 +338,9 @@ the bug. Read the relevant file before drawing conclusions.
         });
     }
 
+    console.log("\n========== VALIDATED FINDINGS ==========\n");
+
+    console.dir(state.findings, { depth: null });
     console.log("\n========== AGENT CONTEXT ==========\n");
     console.log(buildContext(state));
 
