@@ -1,6 +1,6 @@
 import "dotenv/config";
-import { searchCode } from "./tool-calls/tools/searchCode";
-import { readFile } from "./tool-calls/tools/readFile";
+import { searchCode } from "../tools/searchCode";
+import { readFile } from "../tools/readFile";
 import { GoogleGenAI, FunctionDeclaration, Type } from "@google/genai";
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
