@@ -2,7 +2,7 @@
 import "dotenv/config";
 
 import { searchCode } from "../tools/searchCode";
-import { readFile } from "../tools/readFile";
+import { readFile } from "../tools/readFile-v1";
 import { AgentState } from "../../agent/agentState";
 import {
     GoogleGenAI,

@@ -5,6 +5,7 @@ export type Finding = {
     evidence: {
         file: string;
         lines?: string;
+        excerpt: string;
     }[];
 };
 

@@ -2,8 +2,9 @@
 import "dotenv/config";
 
 import { searchCode } from "./tool-calls/tools/searchCode";
-import { readFile } from "./tool-calls/tools/readFile";
+import { readFile } from "./tool-calls/tools/readFile-v2";
 import { AgentState } from "./agent/agentState";
+import { compactHistory } from "./agent/historyManager";
 import {
     GoogleGenAI,
     FunctionDeclaration,
@@ -20,6 +21,7 @@ const model = "gemini-3.5-flash-lite";
 
 const MAX_ITERATIONS = 6;
 const MAX_RECENT_RESULTS = 5;
+const MAX_HISTORY_MESSAGES = 9;
 
 const searchCodeDeclaration: FunctionDeclaration = {
     name: "search_code",
@@ -205,6 +207,15 @@ the bug. Read the relevant file before drawing conclusions.
 
         if (modelContent) {
             history.push(modelContent);
+            if (history.length >= MAX_HISTORY_MESSAGES) {
+                console.log("\n[Context Manager] Compacting conversation history...\n");
+
+                history = compactHistory(state);
+
+                console.log(
+                    `[Context Manager] History reduced to ${history.length} message(s).`
+                );
+            }
         }
 
         const functionCalls = response.functionCalls ?? [];
