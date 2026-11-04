@@ -1,23 +1,26 @@
-
 import "dotenv/config";
 
-import { searchCode } from "./tool-calls/tools/searchCode";
-import { readFile } from "./tool-calls/tools/readFile-v2";
-import { AgentState } from "./agent/agentState";
-import { compactHistory } from "./agent/historyManager";
 import {
     GoogleGenAI,
     FunctionDeclaration,
     Type,
     type Content,
 } from "@google/genai";
+
+import { searchCode } from "./tool-calls/tools/searchCode";
+import { readFile } from "./tool-calls/tools/readFile-v2";
+import { compactHistory } from "./agent/historyManager";
 import { buildContext } from "./agent/contextManager";
 import { addValidatedFinding } from "./agent/findingValidator";
-import type { Finding } from "./agent/agentState";
+import type { AgentState, Finding } from "./agent/agentState";
 
-const ai = new GoogleGenAI({
-    apiKey: process.env.GEMINI_API_KEY,
-});
+const apiKey = process.env.GEMINI_API_KEY;
+
+if (!apiKey) {
+    throw new Error("GEMINI_API_KEY is missing from environment variables.");
+}
+
+const ai = new GoogleGenAI({ apiKey });
 
 const model = "gemini-3.5-flash-lite";
 
@@ -34,7 +37,7 @@ const searchCodeDeclaration: FunctionDeclaration = {
         properties: {
             query: {
                 type: Type.STRING,
-                description: "Text to search for, such as cookie or logout",
+                description: "Text to search for, such as cookie or logout.",
             },
         },
         required: ["query"],
@@ -44,16 +47,15 @@ const searchCodeDeclaration: FunctionDeclaration = {
 const readFileDeclaration: FunctionDeclaration = {
     name: "read_file",
     description:
-        "Read the actual source code of a specific file after search_code " +
-        "has identified it as relevant. Use this to inspect the implementation " +
-        "and understand how the code works. Do not use search_code repeatedly " +
-        "when you already know the relevant file path.",
+        "Read a relevant source file identified by search_code. Use numberedContent " +
+        "to identify exact line numbers. Do not repeatedly search when you already " +
+        "know the relevant file path.",
     parameters: {
         type: Type.OBJECT,
         properties: {
             path: {
                 type: Type.STRING,
-                description: "Repository-relative path of the file to read",
+                description: "Repository-relative path of the file to read.",
             },
         },
         required: ["path"],
@@ -63,14 +65,13 @@ const readFileDeclaration: FunctionDeclaration = {
 const submitFindingDeclaration: FunctionDeclaration = {
     name: "submit_finding",
     description:
-        "Submit a finding supported by exact source-code evidence. Only submit findings from files already inspected using read_file.",
-
+        "Submit a finding supported by exact source-code evidence from files already read.",
     parameters: {
         type: Type.OBJECT,
         properties: {
             claim: {
                 type: Type.STRING,
-                description: "The conclusion or discovery from the investigation.",
+                description: "A precise conclusion supported by the evidence.",
             },
             evidence: {
                 type: Type.ARRAY,
@@ -84,7 +85,7 @@ const submitFindingDeclaration: FunctionDeclaration = {
                         },
                         lines: {
                             type: Type.STRING,
-                            description: "Line range, e.g. 8-12.",
+                            description: "Line range, for example 8-12.",
                         },
                         excerpt: {
                             type: Type.STRING,
@@ -102,8 +103,7 @@ const submitFindingDeclaration: FunctionDeclaration = {
 const finishInvestigationDeclaration: FunctionDeclaration = {
     name: "finish_investigation",
     description:
-        "Finish the investigation when sufficient evidence has been collected and validated.",
-
+        "Finish the investigation after sufficient evidence has been collected and validated.",
     parameters: {
         type: Type.OBJECT,
         properties: {
@@ -116,17 +116,77 @@ const finishInvestigationDeclaration: FunctionDeclaration = {
     },
 };
 
+type ToolCall = NonNullable<
+    Awaited<ReturnType<typeof ai.models.generateContent>>["functionCalls"]
+>[number];
+
+type ToolOutcome = {
+    call: ToolCall;
+    response: unknown;
+};
+
+/**
+ * Executes a tool and returns its result.
+ *
+ * search_code and read_file do not mutate AgentState here.
+ * State updates are handled centrally by recordToolResult().
+ *
+ * submit_finding and finish_investigation remain stateful and are only
+ * executed through the sequential path.
+ */
 async function executeTool(
     name: string,
     args: Record<string, unknown>,
     state: AgentState
 ): Promise<unknown> {
+    if (state.completed) {
+        throw new Error("The investigation is already complete.");
+    }
 
-    if (name === "finish_investigation") {
-        if (state.completed) {
-            throw new Error("Investigation is already complete.");
+    if (name === "search_code") {
+        const query = args.query;
+
+        if (
+            typeof query !== "string" ||
+            query.trim().length === 0 ||
+            query.length > 100
+        ) {
+            throw new Error("Invalid search_code arguments.");
         }
 
+        console.log(`Tool requested: search_code("${query}")`);
+        return await searchCode(query);
+    }
+
+    if (name === "read_file") {
+        const filePath = args.path;
+
+        if (
+            typeof filePath !== "string" ||
+            filePath.trim().length === 0 ||
+            filePath.length > 300
+        ) {
+            throw new Error("Invalid read_file arguments.");
+        }
+
+        console.log(`Tool requested: read_file("${filePath}")`);
+        return await readFile(filePath);
+    }
+
+    if (name === "submit_finding") {
+        const finding = args as unknown as Finding;
+
+        console.log(`Tool requested: submit_finding("${finding.claim}")`);
+        await addValidatedFinding(finding, state);
+        console.log("Finding successfully validated and stored.");
+
+        return {
+            success: true,
+            message: "Finding successfully validated and stored.",
+        };
+    }
+
+    if (name === "finish_investigation") {
         if (state.findings.length === 0) {
             throw new Error(
                 "Cannot finish: no validated findings have been submitted."
@@ -135,10 +195,7 @@ async function executeTool(
 
         const reason = args.reason;
 
-        if (
-            typeof reason !== "string" ||
-            reason.trim().length === 0
-        ) {
+        if (typeof reason !== "string" || reason.trim().length === 0) {
             throw new Error("A valid completion reason is required.");
         }
 
@@ -153,81 +210,163 @@ async function executeTool(
             message: "Investigation marked as complete.",
         };
     }
-    if (name === "submit_finding") {
-        const finding = args as unknown as Finding;
-        console.log(`Tool requested: submit_finding("${finding.claim}")`);
-        await addValidatedFinding(finding, state);
-        console.log("Finding successfully validated and stored.");
 
-        return {
-            success: true,
-            message: "Finding successfully validated and stored.",
-        };
-    }
-    if (name === "search_code") {
-        const query = args.query;
-
-        if (
-            typeof query !== "string" ||
-            query.trim().length === 0 ||
-            query.length > 100
-        ) {
-            throw new Error("Invalid search arguments");
-        }
-
-        console.log(`Tool requested: search_code("${query}")`);
-
-        const result = await searchCode(query);
-
-        state.recentToolResults.push({
-            tool: name,
-            result,
-        });
-
-        if (state.recentToolResults.length > MAX_RECENT_RESULTS) {
-            state.recentToolResults =
-                state.recentToolResults.slice(-MAX_RECENT_RESULTS);
-        }
-
-        return result;
-    }
-
-    if (name === "read_file") {
-        const path = args.path;
-
-        if (
-            typeof path !== "string" ||
-            path.trim().length === 0 ||
-            path.length > 300
-        ) {
-            throw new Error("Invalid read_file arguments");
-        }
-
-        console.log(`Tool requested: read_file("${path}")`);
-
-        const result = await readFile(path);
-
-        if (!state.inspectedFiles.includes(result.path)) {
-            state.inspectedFiles.push(result.path);
-        }
-
-        state.recentToolResults.push({
-            tool: name,
-            result,
-        });
-
-        if (state.recentToolResults.length > MAX_RECENT_RESULTS) {
-            state.recentToolResults =
-                state.recentToolResults.slice(-MAX_RECENT_RESULTS);
-        }
-
-        return result;
-    }
-
-    throw new Error(`Tool "${name}" is not allowed`);
+    throw new Error(`Tool "${name}" is not allowed.`);
 }
 
-async function main() {
+/**
+ * Centralized state update.
+ *
+ * This is called after tool execution has completed. In parallel batches,
+ * outcomes are processed in the original function-call order.
+ */
+function recordToolResult(
+    name: string,
+    result: unknown,
+    state: AgentState
+): void {
+    if (name === "read_file") {
+        const fileResult = result as { path?: unknown };
+
+        if (
+            typeof fileResult.path === "string" &&
+            !state.inspectedFiles.includes(fileResult.path)
+        ) {
+            state.inspectedFiles.push(fileResult.path);
+        }
+    }
+
+    if (name === "search_code" || name === "read_file") {
+        state.recentToolResults.push({
+            tool: name,
+            result,
+        });
+
+        if (state.recentToolResults.length > MAX_RECENT_RESULTS) {
+            state.recentToolResults =
+                state.recentToolResults.slice(-MAX_RECENT_RESULTS);
+        }
+    }
+}
+
+function getErrorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+}
+
+async function runToolCalls(
+    functionCalls: ToolCall[],
+    state: AgentState
+): Promise<ToolOutcome[]> {
+    const canRunInParallel =
+        functionCalls.length > 1 &&
+        functionCalls.every((call) => call.name === "search_code");
+
+    if (canRunInParallel) {
+        console.log(
+            "\n[Tool Executor] Running independent searches in parallel...\n"
+        );
+
+        const settledResults = await Promise.allSettled(
+            functionCalls.map((call) =>
+                executeTool(
+                    call.name ?? "",
+                    (call.args ?? {}) as Record<string, unknown>,
+                    state
+                )
+            )
+        );
+
+        // Promise.allSettled preserves input order. Apply state updates
+        // centrally and in that same order.
+        return settledResults.map((outcome, index) => {
+            const call = functionCalls[index];
+
+            if (outcome.status === "fulfilled") {
+                recordToolResult(call.name ?? "", outcome.value, state);
+
+                return {
+                    call,
+                    response: outcome.value,
+                };
+            }
+
+            return {
+                call,
+                response: {
+                    success: false,
+                    error: getErrorMessage(outcome.reason),
+                },
+            };
+        });
+    }
+
+    console.log("\n[Tool Executor] Running tools sequentially...\n");
+
+    const outcomes: ToolOutcome[] = [];
+
+    for (const call of functionCalls) {
+        try {
+            const result = await executeTool(
+                call.name ?? "",
+                (call.args ?? {}) as Record<string, unknown>,
+                state
+            );
+
+            recordToolResult(call.name ?? "", result, state);
+
+            outcomes.push({
+                call,
+                response: result,
+            });
+        } catch (error) {
+            const message = getErrorMessage(error);
+
+            console.error(`Tool ${call.name} failed:`, message);
+
+            outcomes.push({
+                call,
+                response: {
+                    success: false,
+                    error: message,
+                },
+            });
+        }
+    }
+
+    return outcomes;
+}
+
+/**
+ * Gemini requires functionResponse.response to be a JSON object (map),
+ * not a bare array or primitive. search_code returns an array, so wrap it.
+ */
+function toFunctionResponsePayload(
+    response: unknown
+): Record<string, unknown> {
+    if (
+        response !== null &&
+        typeof response === "object" &&
+        !Array.isArray(response)
+    ) {
+        return response as Record<string, unknown>;
+    }
+
+    return { result: response };
+}
+
+function toFunctionResponseParts(
+    outcomes: ToolOutcome[]
+): NonNullable<Content["parts"]> {
+    return outcomes.map(({ call, response }) => ({
+        functionResponse: {
+            name: call.name ?? "",
+            ...(call.id ? { id: call.id } : {}),
+            response: toFunctionResponsePayload(response),
+        },
+    }));
+}
+
+async function main(): Promise<void> {
     const question =
         process.argv.slice(2).join(" ") ||
         "Investigate why logout might not clear the authentication cookie.";
@@ -238,38 +377,35 @@ You are a code investigation agent.
 Your goal is to investigate the user's issue using the available
 repository tools and provide an evidence-based explanation.
 
-Investigation strategy:
-
 FINDING RULES:
 
 1. Use search_code to locate relevant code.
-2. Use read_file to inspect the complete relevant source.
+2. Use read_file to inspect relevant source code.
 3. Use numberedContent to identify exact source line numbers.
 4. Once you have sufficient evidence, call submit_finding.
 5. Include the exact source excerpt and its line range.
 6. Never invent line numbers or source excerpts.
 7. If submit_finding rejects your evidence, correct it or investigate further.
-8. Once a finding is successfully submitted and it answers the task,
-   provide your final explanation instead of repeating searches.
+8. Do not repeat searches or file inspections unnecessarily.
 
-Available tools:
+AVAILABLE TOOLS:
 
 - search_code: Find relevant files and lines.
 - read_file: Inspect the actual contents of a specific file.
 - submit_finding: Submit evidence-backed findings for validation.
-- finish_investigation: Mark the investigation complete when sufficient evidence exists.
+- finish_investigation: Mark the investigation complete.
 
 COMPLETION RULES:
 
-1. Do not finish an investigation without sufficient evidence.
+1. Do not finish without sufficient evidence.
 2. Submit relevant findings using submit_finding.
-3. Once the validated findings sufficiently answer the original task,
+3. Once validated findings sufficiently answer the original task,
    call finish_investigation.
 4. Do not continue searching after the investigation is complete.
 5. If evidence is insufficient, continue investigating.
 
-Important:
-A search result is not enough to conclude that a file contains
+IMPORTANT:
+A search result alone is not enough to conclude that a file contains
 the bug. Read the relevant file before drawing conclusions.
 `;
 
@@ -283,7 +419,6 @@ the bug. Read the relevant file before drawing conclusions.
         completionReason: undefined,
     };
 
-    // The harness now owns the conversation history.
     let history: Content[] = [
         {
             role: "user",
@@ -299,121 +434,100 @@ the bug. Read the relevant file before drawing conclusions.
                     searchCodeDeclaration,
                     readFileDeclaration,
                     submitFindingDeclaration,
-                    finishInvestigationDeclaration
+                    finishInvestigationDeclaration,
                 ],
             },
         ],
     };
 
-
-
-    // First model request.
     let response = await ai.models.generateContent({
         model,
         contents: history,
         config,
     });
 
-    // Agent execution loop.
     for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
         state.iteration = iteration + 1;
 
-        // Preserve the complete model response, including function calls.
+        // Preserve the model response, including its function-call parts.
         const modelContent = response.candidates?.[0]?.content;
 
         if (modelContent) {
             history.push(modelContent);
-            if (history.length >= MAX_HISTORY_MESSAGES) {
-                console.log("\n[Context Manager] Compacting conversation history...\n");
-
-                history = compactHistory(state);
-
-                console.log(
-                    `[Context Manager] History reduced to ${history.length} message(s).`
-                );
-            }
         }
 
         const functionCalls = response.functionCalls ?? [];
 
-        // The model has finished its investigation.
+        // No tool calls: the model stopped. Only accept this as a final
+        // answer if the harness has explicitly marked the task complete.
         if (functionCalls.length === 0) {
             console.log("\n========== AGENT CONTEXT ==========\n");
             console.log(buildContext(state));
 
+            if (!state.completed) {
+                console.log("\n========== INCOMPLETE INVESTIGATION ==========\n");
+                console.log(
+                    response.text ??
+                    "The agent stopped without providing a final response."
+                );
+                console.log(
+                    "\nStopped: the agent did not explicitly complete the investigation."
+                );
+                return;
+            }
+
             console.log("\n========== FINAL ANSWER ==========\n");
             console.log(response.text);
-
             return;
         }
 
-        // Collect all tool responses from this model turn.
-        const functionResponseParts: NonNullable<Content["parts"]> = [];
+        const outcomes = await runToolCalls(functionCalls, state);
+        const functionResponseParts = toFunctionResponseParts(outcomes);
 
-        for (const call of functionCalls) {
-            try {
-                const result = await executeTool(
-                    call.name ?? "",
-                    (call.args ?? {}) as Record<string, unknown>,
-                    state
-                );
-
-                functionResponseParts.push({
-                    functionResponse: {
-                        name: call.name,
-                        ...(call.id ? { id: call.id } : {}),
-                        response: { result },
-                    },
-                });
-            } catch (error) {
-                const errorMessage =
-                    error instanceof Error
-                        ? error.message
-                        : "Tool execution failed";
-
-                console.error(
-                    `Tool ${call.name} failed:`,
-                    errorMessage
-                );
-
-                functionResponseParts.push({
-                    functionResponse: {
-                        name: call.name,
-                        ...(call.id ? { id: call.id } : {}),
-                        response: {
-                            error: errorMessage,
-                        },
-                    },
-                });
-            }
-        }
-
-        // Add tool results to manually managed history.
+        // Function responses are sent back as a user-role content item.
         history.push({
             role: "user",
             parts: functionResponseParts,
         });
 
-        // Check whether the harness marked the investigation complete.
+        // Once finish_investigation succeeds, request a final answer without
+        // exposing tools to the model again.
         if (state.completed) {
             console.log("\n[Agent] Switching to final-answer mode...");
 
             const finalResponse = await ai.models.generateContent({
                 model,
-                contents: history,
+                contents: [
+                    ...history,
+                    {
+                        role: "user",
+                        parts: [
+                            {
+                                text: `
+Validated investigation state:
+
+${buildContext(state)}
+
+Completion reason:
+${state.completionReason}
+
+Write the final answer using only the validated evidence above.
+Include file paths and line numbers where available.
+Distinguish confirmed findings from assumptions.
+Do not request or execute additional tools.
+                                `.trim(),
+                            },
+                        ],
+                    },
+                ],
                 config: {
                     systemInstruction: `
-You are now in final-answer mode.
-
-The investigation has been marked complete by the harness.
-
-Use the validated findings provided in the investigation context.
-Explain the original issue clearly.
-Include relevant file paths and line numbers.
-Do not invent additional evidence.
-Do not request or execute more tools.
-Distinguish confirmed findings from assumptions.
-            `.trim(),
+You are in final-answer mode.
+The harness has explicitly marked the investigation complete.
+Explain the findings clearly and accurately.
+Do not invent evidence or claim more than the source proves.
+Do not call tools.
+                    `.trim(),
                 },
             });
 
@@ -429,7 +543,19 @@ Distinguish confirmed findings from assumptions.
             return;
         }
 
-        // Investigation is not complete. Continue the agent loop.
+        // Compact only after the complete tool-response cycle.
+        if (history.length >= MAX_HISTORY_MESSAGES) {
+            console.log(
+                "\n[Context Manager] Compacting conversation history...\n"
+            );
+
+            history = compactHistory(state);
+
+            console.log(
+                `[Context Manager] History reduced to ${history.length} message(s).`
+            );
+        }
+
         response = await ai.models.generateContent({
             model,
             contents: history,
@@ -438,13 +564,10 @@ Distinguish confirmed findings from assumptions.
     }
 
     console.log("\n========== VALIDATED FINDINGS ==========\n");
-
     console.dir(state.findings, { depth: null });
+
     console.log("\n========== AGENT CONTEXT ==========\n");
     console.log(buildContext(state));
-
-    console.log("\n========== FINAL RESPONSE ==========\n");
-    console.log(response.text);
 
     console.log(
         "\nStopped: maximum tool iterations reached. " +
